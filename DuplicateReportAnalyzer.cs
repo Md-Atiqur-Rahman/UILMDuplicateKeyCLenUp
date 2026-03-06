@@ -1,108 +1,140 @@
 ﻿using MongoDB.Bson;
 using MongoDB.Driver;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Text.RegularExpressions;
-using System.Threading.Tasks;
+using QuestPDF.Fluent;
+using QuestPDF.Helpers;
+using QuestPDF.Previewer;
 
 namespace ConsoleApp;
 
 public static class DuplicateReportAnalyzer
 {
     public static async Task GenerateSummaryReport(
-        string keyNameFilter = null,
+        string? keyNameFilter = null,
         bool? hasRootModule = null,
         bool? hasGenericModule = null,
         bool? allCultureValuesSame = null)
     {
         var client = new MongoClient("mongodb://localhost:27017");
         var database = client.GetDatabase("UILM_DB");
-        var reportCollection = database.GetCollection<BsonDocument>("Duplicate_Key_Report");
+        var collection = database.GetCollection<BsonDocument>("Duplicate_Key_Report");
 
-        // 🔹 Build dynamic filter
         var filterBuilder = Builders<BsonDocument>.Filter;
-        var filters = new List<FilterDefinition<BsonDocument>>();
+        var filter = filterBuilder.Empty;
 
         if (!string.IsNullOrEmpty(keyNameFilter))
-            filters.Add(filterBuilder.Eq("KeyName", keyNameFilter));
+            filter &= filterBuilder.Eq("KeyName", keyNameFilter);
 
         if (hasRootModule.HasValue)
-            filters.Add(filterBuilder.Eq("HasRootModule", hasRootModule.Value));
+            filter &= filterBuilder.Eq("HasRootModule", hasRootModule.Value);
 
         if (hasGenericModule.HasValue)
-            filters.Add(filterBuilder.Eq("HasGenericModule", hasGenericModule.Value));
+            filter &= filterBuilder.Eq("HasGenericModule", hasGenericModule.Value);
 
         if (allCultureValuesSame.HasValue)
-            filters.Add(filterBuilder.Eq("AllCultureValuesSame", allCultureValuesSame.Value));
+            filter &= filterBuilder.Eq("AllCultureValuesSame", allCultureValuesSame.Value);
 
-        var finalFilter = filters.Any() ? filterBuilder.And(filters) : filterBuilder.Empty;
+        var results = await collection.Find(filter).ToListAsync();
 
-        var records = await reportCollection.Find(finalFilter).ToListAsync();
-
-        Console.WriteLine("🔹 Duplicate Key Analysis Summary 🔹\n");
-
-        foreach (var doc in records)
+        if (!results.Any())
         {
-            string keyName = doc.GetValue("KeyName", "").AsString;
-            bool hasRoot = doc.GetValue("HasRootModule", false).ToBoolean();
-            bool hasGeneric = doc.GetValue("HasGenericModule", false).ToBoolean();
-            bool allCultureSame = doc.GetValue("AllCultureValuesSame", false).ToBoolean();
-
-            var modules = doc["Modules"].AsBsonArray.Select(m => m["Module"].AsString).ToList();
-
-            // Find culture mismatches
-            var cultureMismatch = new Dictionary<string, List<string>>(); // culture -> differing values
-
-            var cultureValuesMap = new Dictionary<string, HashSet<string>>();
-
-            foreach (var module in doc["Modules"].AsBsonArray)
-            {
-                var resources = module["Resources"].AsBsonArray;
-                foreach (var res in resources)
-                {
-                    string culture = res["Culture"].AsString;
-                    string value = res["Value"].AsString.Trim(); // trim leading/trailing spaces
-                    if (culture == "id" || culture == "app id") continue; // ignore these
-
-                    // Remove trailing punctuation (dot, comma, colon) for comparison
-                    value = Regex.Replace(value, @"[.,:]$", "").Trim();
-
-                    if (!cultureValuesMap.ContainsKey(culture))
-                        cultureValuesMap[culture] = new HashSet<string>();
-
-                    cultureValuesMap[culture].Add(value);
-                }
-            }
-
-            foreach (var kvp in cultureValuesMap)
-            {
-                if (kvp.Value.Count > 1)
-                {
-                    cultureMismatch[kvp.Key] = kvp.Value.ToList();
-                }
-            }
-
-            // Display summary
-            Console.WriteLine($"KeyName: {keyName}");
-            Console.WriteLine($"Modules: {string.Join(", ", modules)}");
-            Console.WriteLine($"HasRootModule: {hasRoot}");
-            Console.WriteLine($"HasGenericModule: {hasGeneric}");
-            Console.WriteLine($"AllCultureValuesSame: {allCultureSame}");
-
-            if (cultureMismatch.Any())
-            {
-                Console.WriteLine("Mismatch Cultures:");
-                foreach (var cm in cultureMismatch)
-                {
-                    Console.WriteLine($"  {cm.Key}: {string.Join(" | ", cm.Value)}");
-                }
-            }
-
-            Console.WriteLine(new string('-', 50));
+            Console.WriteLine("No matching records found.");
+            return;
         }
 
-        Console.WriteLine($"\nTotal Records with AllCultureValuesSame = false: {records.Count}");
+        GeneratePdf(results);
+
+        Console.WriteLine("✅ PDF Report Generated : DuplicateKeyReport.pdf");
+    }
+
+    private static void GeneratePdf(List<BsonDocument> results)
+    {
+        var document = Document.Create(container =>
+        {
+            container.Page(page =>
+            {
+                page.Size(PageSizes.A4);
+                page.Margin(20);
+                page.Content().Column(col =>
+                {
+                    col.Item().Text("Duplicate Key Analysis Report")
+                        .FontSize(20)
+                        .Bold();
+
+                    col.Item().Text($"Generated: {DateTime.Now}")
+                        .FontSize(10);
+
+                    col.Item().PaddingTop(20).Text("");
+
+                    foreach (var doc in results)
+                    {
+                        string key = doc["KeyName"].AsString;
+                        bool root = doc["HasRootModule"].AsBoolean;
+                        bool generic = doc["HasGenericModule"].AsBoolean;
+                        bool same = doc["AllCultureValuesSame"].AsBoolean;
+
+                        col.Item().Text($"KeyName: {key}")
+                            .FontSize(14)
+                            .Bold();
+
+                        col.Item().Text($"HasRootModule: {root} | HasGenericModule: {generic} | AllCultureValuesSame: {same}")
+                            .FontSize(10);
+
+                        col.Item().PaddingTop(10).Table(table =>
+                        {
+                            table.ColumnsDefinition(columns =>
+                            {
+                                columns.RelativeColumn(1);
+                                columns.RelativeColumn(1);
+                                columns.RelativeColumn(1);
+                                columns.RelativeColumn(1);
+                                columns.RelativeColumn(1);
+                            });
+
+                            // Header row
+                            table.Header(header =>
+                            {
+                                header.Cell().Background("#CCCCCC").Text("Module").FontSize(9).Bold();
+                                header.Cell().Background("#CCCCCC").Text("en-US").FontSize(9).Bold();
+                                header.Cell().Background("#CCCCCC").Text("de-DE").FontSize(9).Bold();
+                                header.Cell().Background("#CCCCCC").Text("fr-FR").FontSize(9).Bold();
+                                header.Cell().Background("#CCCCCC").Text("it-IT").FontSize(9).Bold();
+                            });
+
+                            // Data rows
+                            var modules = doc["Modules"].AsBsonArray;
+
+                            foreach (var module in modules)
+                            {
+                                var moduleName = module["Module"].AsString;
+                                string en = "", de = "", fr = "", it = "";
+
+                                foreach (var res in module["Resources"].AsBsonArray)
+                                {
+                                    var culture = res["Culture"].AsString;
+                                    var value = res["Value"].AsString;
+
+                                    if (culture == "en-US") en = value;
+                                    if (culture == "de-DE") de = value;
+                                    if (culture == "fr-FR") fr = value;
+                                    if (culture == "it-IT") it = value;
+                                }
+
+                                table.Cell().Text(moduleName).FontSize(9);
+                                table.Cell().Text(en).FontSize(9);
+                                table.Cell().Text(de).FontSize(9);
+                                table.Cell().Text(fr).FontSize(9);
+                                table.Cell().Text(it).FontSize(9);
+
+                                Console.WriteLine($"{moduleName} | {en} | {de} | {fr} | {it}");
+                            }
+                        });
+
+                        col.Item().PaddingTop(15).Text("");
+                    }
+                });
+            });
+        });
+
+        document.GeneratePdf("DuplicateKeyReport.pdf");
     }
 }
