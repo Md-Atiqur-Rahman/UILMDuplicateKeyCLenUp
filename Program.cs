@@ -6,7 +6,13 @@ using QuestPDF.Infrastructure;
 QuestPDF.Settings.License = LicenseType.Community;
 
 
-await DuplicateReportAnalyzer.GenerateSummaryReport(
-    keyNameFilter: null,
-    allCultureValuesSame: false
+//await DuplicateDetector.GenerateDuplicateReport();
+
+//await DuplicateReportAnalyzer.GenerateSummaryReport(
+//    keyNameFilter: null
+//);
+
+//Generate InConsistentSummary Report
+await InConsistentSummaryReportGenerator.GenerateInConsistentSummaryReport(
+    keyNameFilter: null
 );

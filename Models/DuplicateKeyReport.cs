@@ -12,7 +12,7 @@ public class DuplicateKeyReport
     public int TotalDuplicateCount { get; set; }
     public bool HasRootModule { get; set; }
     public bool HasGenericModule { get; set; }
-    public bool AllCultureValuesSame { get; set; }
+    public bool Isconsistent { get; set; }
     public List<ModuleInfo> Modules { get; set; }
     public bool Processed { get; set; }
 }
