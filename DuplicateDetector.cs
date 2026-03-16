@@ -69,7 +69,7 @@ public static class DuplicateDetector
         // 🔹 C# Level Calculation
         foreach (var doc in result)
         {
-            bool isconsistent = true;
+            bool isConsistent = true;
 
             var modules = doc["Modules"].AsBsonArray;
 
@@ -108,12 +108,12 @@ public static class DuplicateDetector
             {
                 if (culture.Value.Distinct().Count() > 1)
                 {
-                    isconsistent = false;
+                    isConsistent = false;
                     break;
                 }
             }
 
-            doc["Isconsistent"] = isconsistent;
+            doc["IsConsistent"] = isConsistent;
         }
 
         if (result.Any())

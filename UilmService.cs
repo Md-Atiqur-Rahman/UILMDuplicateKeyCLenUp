@@ -12,17 +12,18 @@ namespace ConsoleApp;
 public static class UilmService
 {
     private const string BaseUrl = "https://api.seliseblocks.com";
-    private const string ProjectKey = "5350C966B6894A61B0913EB9FD5DC928";
-    private const string BlocksKey = "d7e5554c758541db8a18694b64ef423d";
+    private const string ProjectKey = "";
+    private const string BlocksKey = "";
 
-    public static async Task CallGetApi(string itemId, string bearerToken)
+    private const string BearerToken = "";
+    public static async Task CallGetApi(string itemId)
     {
         using var client = new HttpClient();
         client.BaseAddress = new Uri(BaseUrl);
 
         // Authorization Header
         client.DefaultRequestHeaders.Authorization =
-            new AuthenticationHeaderValue("Bearer", bearerToken);
+            new AuthenticationHeaderValue("Bearer", BearerToken);
 
         // Accept Header
         client.DefaultRequestHeaders.Accept.Add(
