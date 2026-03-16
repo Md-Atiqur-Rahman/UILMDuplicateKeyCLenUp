@@ -11,11 +11,11 @@ namespace ConsoleApp;
 
 public static class UilmService
 {
-    private const string BaseUrl = "https://api.seliseblocks.com";
+    private const string BaseUrl = "";
     private const string ProjectKey = "";
     private const string BlocksKey = "";
-
     private const string BearerToken = "";
+
     public static async Task CallGetApi(string itemId)
     {
         using var client = new HttpClient();

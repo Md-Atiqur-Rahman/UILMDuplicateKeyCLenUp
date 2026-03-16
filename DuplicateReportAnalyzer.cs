@@ -9,6 +9,23 @@ namespace ConsoleApp;
 
 public static class DuplicateReportAnalyzer
 {
+    // ✅ Add these helper classes here
+    private class MigrationFilterResult
+    {
+        public string FilterType { get; set; }
+        public bool HasRootModule { get; set; }
+        public bool HasGenericModule { get; set; }
+        public bool IsConsistent { get; set; }
+        public List<KeyMigrationDetail> Keys { get; set; } = new();
+    }
+
+    private class KeyMigrationDetail
+    {
+        public string Name { get; set; }
+        public int PreviousModules { get; set; }
+        public int DeletedModules { get; set; }
+    }
+
     private class SummaryStats
     {
         public int TotalDuplicateKeys { get; set; }
@@ -44,6 +61,7 @@ public static class DuplicateReportAnalyzer
         public int DistinctValueCount { get; set; }
     }
 
+    // ✅ Public methods start here
     public static async Task GenerateSummaryReport(
         string? keyNameFilter = null,
         bool? hasRootModule = null,
@@ -85,7 +103,7 @@ public static class DuplicateReportAnalyzer
             await ExecuteDeleteOperation(results, collection, deletedModulesCollection);
         }
 
-        GeneratePdf(results, isDeletePermission);
+        //GeneratePdf(results, isDeletePermission);
 
         Console.WriteLine("✅ PDF Report Generated : DuplicateKeyReport.pdf");
     }
@@ -100,6 +118,8 @@ public static class DuplicateReportAnalyzer
         var migrationResultCollection = database.GetCollection<BsonDocument>("MigrationResult");
 
         var deletedRecords = new List<BsonDocument>();
+        var uilmDeleteItemIds = new List<string>();  // ✅ Track items to delete from UILM
+        var uilmSaveItems = new List<UilmBulkOperationService.UilmKeyForBulkSave>();  // ✅ Track items to save to UILM
         
         // Track migration results by filter type
         var migrationResults = new Dictionary<string, MigrationFilterResult>
@@ -143,6 +163,7 @@ public static class DuplicateReportAnalyzer
                 // Extract consistent data from first module
                 var firstModule = modules[0].AsBsonDocument;
                 var consistentResources = firstModule["Resources"].AsBsonArray;
+                var firstModuleId = firstModule["Id"].AsString;
 
                 // Create new root module with consistent data
                 var newRootModule = new BsonDocument
@@ -153,6 +174,23 @@ public static class DuplicateReportAnalyzer
                 };
 
                 var modulesToKeep = new BsonArray { newRootModule };
+
+                // ✅ Track ALL modules for deletion from UILM (Filter A also deletes from UILM)
+                foreach (var module in modules)
+                {
+                    if (module["Id"] != null)
+                    {
+                        uilmDeleteItemIds.Add(module["Id"].AsString);
+                    }
+                }
+
+                // ✅ Prepare for UILM save (new root module)
+                var uilmNewKey = ConvertToUilmBulkSaveFormat(
+                    doc["KeyName"].AsString,
+                    newRootModule,
+                    doc
+                );
+                //uilmSaveItems.Add(uilmNewKey);
 
                 // ✅ Archive deleted modules
                 var archivedRecord = new BsonDocument
@@ -166,7 +204,9 @@ public static class DuplicateReportAnalyzer
                     { "IsConsistent", isConsistent },
                     { "DeletedModules", modulesToDelete },
                     { "NewRootModuleCreated", newRootModule },
-                    { "ConsistentDataExtractedFrom", firstModule["Module"] }
+                    { "ConsistentDataExtractedFrom", firstModule["Module"] },
+                    { "UilmDeleteAttempted", false },
+                    { "UilmSaveAttempted", false }
                 };
 
                 deletedRecords.Add(archivedRecord);
@@ -183,7 +223,8 @@ public static class DuplicateReportAnalyzer
                     updateDefinition);
 
                 Console.WriteLine($"✅ [FILTER A] Deleted {deletedModuleCount} modules for KeyName: {keyName}");
-                Console.WriteLine($"   └─ Created new 'app-root' module with consistent data");
+                Console.WriteLine($"   └─ Deleted from UILM: {deletedModuleCount} old modules");
+                Console.WriteLine($"   └─ Created in UILM: 1 new 'app-root' module");
             }
 
             // ✅ FILTER B: HasRoot=False, HasGeneric=True, IsConsistent=True
@@ -191,7 +232,8 @@ public static class DuplicateReportAnalyzer
             {
                 var modulesToKeep = new BsonArray();
                 var modulesToDelete = new BsonArray();
-                var genericAppKept = false;  // Track if we've already kept one generic-app
+                var genericAppKept = false;
+                BsonDocument keptGenericModule = null;
 
                 foreach (var module in modules)
                 {
@@ -201,12 +243,17 @@ public static class DuplicateReportAnalyzer
                     if (moduleName == "generic-app" && !genericAppKept)
                     {
                         modulesToKeep.Add(module);
-                        genericAppKept = true;  // Mark that we've kept one
+                        genericAppKept = true;
+                        keptGenericModule = module.AsBsonDocument;
                     }
                     else
                     {
-                        // Delete: all other modules OR duplicate generic-app
                         modulesToDelete.Add(module);
+                        // ✅ Track deleted item IDs for UILM deletion
+                        if (module["Id"] != null)
+                        {
+                            uilmDeleteItemIds.Add(module["Id"].AsString);
+                        }
                     }
                 }
 
@@ -226,14 +273,15 @@ public static class DuplicateReportAnalyzer
                         { "DeletedModules", modulesToDelete },
                         { "GenericModuleKept", modulesToKeep.Count > 0 ? modulesToKeep[0] : null },
                         { "DuplicateGenericAppRemoved", modulesToDelete.Cast<BsonDocument>()
-                            .Count(m => m["Module"].AsString == "generic-app") }  // ✅ Track duplicates
+                            .Count(m => m["Module"].AsString == "generic-app") },
+                        { "UilmDeleteAttempted", false }
                     };
 
                     deletedRecords.Add(archivedRecord);
                 }
 
                 var updateDefinition = Builders<BsonDocument>.Update
-                    .Set("Modules", modulesToKeep)  // ✅ Only ONE generic-app remains
+                    .Set("Modules", modulesToKeep)
                     .Set("UpdatedAt", DateTime.UtcNow)
                     .Set("ModulesDeletionTriggered", true)
                     .Set("FilterType", "B");
@@ -244,8 +292,6 @@ public static class DuplicateReportAnalyzer
 
                 Console.WriteLine($"✅ [FILTER B] Deleted {deletedModuleCount} modules for KeyName: {keyName}");
                 Console.WriteLine($"   └─ Kept ONE 'generic-app' module only");
-                if (deletedModuleCount - (modulesToDelete.Cast<BsonDocument>().Count(m => m["Module"].AsString == "generic-app") - 1) > 0)
-                    Console.WriteLine($"   └─ Removed {modulesToDelete.Cast<BsonDocument>().Count(m => m["Module"].AsString == "generic-app")} duplicate generic-app(s)");
             }
 
             // ✅ FILTER C: HasRoot=True, HasGeneric=False, IsConsistent=True
@@ -265,6 +311,11 @@ public static class DuplicateReportAnalyzer
                     else
                     {
                         modulesToDelete.Add(module);
+                        // ✅ Track deleted item IDs for UILM deletion
+                        if (module["Id"] != null)
+                        {
+                            uilmDeleteItemIds.Add(module["Id"].AsString);
+                        }
                     }
                 }
 
@@ -282,7 +333,8 @@ public static class DuplicateReportAnalyzer
                         { "HasGenericModule", hasGeneric },
                         { "IsConsistent", isConsistent },
                         { "DeletedModules", modulesToDelete },
-                        { "RootModuleKept", modulesToKeep.Count > 0 ? modulesToKeep[0] : null }
+                        { "RootModuleKept", modulesToKeep.Count > 0 ? modulesToKeep[0] : null },
+                        { "UilmDeleteAttempted", false }
                     };
 
                     deletedRecords.Add(archivedRecord);
@@ -319,6 +371,11 @@ public static class DuplicateReportAnalyzer
                     else
                     {
                         modulesToDelete.Add(module);
+                        // ✅ Track deleted item IDs for UILM deletion
+                        if (module["Id"] != null)
+                        {
+                            uilmDeleteItemIds.Add(module["Id"].AsString);
+                        }
                     }
                 }
 
@@ -336,7 +393,8 @@ public static class DuplicateReportAnalyzer
                         { "HasGenericModule", hasGeneric },
                         { "IsConsistent", isConsistent },
                         { "DeletedModules", modulesToDelete },
-                        { "RootModuleKept", modulesToKeep[0] }
+                        { "RootModuleKept", modulesToKeep[0] },
+                        { "UilmDeleteAttempted", false }
                     };
 
                     deletedRecords.Add(archivedRecord);
@@ -390,8 +448,116 @@ public static class DuplicateReportAnalyzer
                 Console.WriteLine($"   • Filter D: {filterDCount} records (Kept 'app-root' only)");
         }
 
+        // ✅ Execute UILM Operations
+        await ExecuteUilmOperations(uilmDeleteItemIds, uilmSaveItems, deletedRecords, deletedModulesCollection);
+
         // ✅ Store migration results
         await StoreMigrationResults(migrationResultCollection, migrationResults);
+    }
+
+    private static async Task ExecuteUilmOperations(
+        List<string> deleteItemIds,
+        List<UilmBulkOperationService.UilmKeyForBulkSave> saveItems,
+        List<BsonDocument> deletedRecords,
+        IMongoCollection<BsonDocument> deletedModulesCollection)
+    {
+        Console.WriteLine("\n🚀 Starting UILM Operations...\n");
+
+        // ✅ Process Delete Items
+        if (deleteItemIds.Any())
+        {
+            Console.WriteLine($"📋 Checking {deleteItemIds.Count} items for existence in UILM...");
+            var existingItems = new List<string>();
+
+            foreach (var itemId in deleteItemIds)
+            {
+                var exists = await UilmBulkOperationService.ItemExistsAsync(itemId);
+                if (exists)
+                {
+                    existingItems.Add(itemId);
+                    Console.WriteLine($"   ✓ Item exists: {itemId}");
+                }
+                else
+                {
+                    Console.WriteLine($"   ✗ Item not found: {itemId}");
+                }
+            }
+
+            if (existingItems.Any())
+            {
+                Console.WriteLine($"\n🗑️  Bulk deleting {existingItems.Count} items from UILM...");
+                var (deleteSuccess, deleteMessage) = await UilmBulkOperationService.BulkDeleteAsync(existingItems);
+
+                // Update archive records with delete status
+                foreach (var deletedRecord in deletedRecords.Where(r => 
+                    existingItems.Contains(r["DeletedModules"].AsBsonArray[0]["Id"].AsString)))
+                {
+                    var updateDef = Builders<BsonDocument>.Update
+                        .Set("UilmDeleteAttempted", true)
+                        .Set("UilmDeleteSuccess", deleteSuccess)
+                        .Set("UilmDeleteMessage", deleteMessage);
+
+                    await deletedModulesCollection.UpdateOneAsync(
+                        Builders<BsonDocument>.Filter.Eq("_id", deletedRecord["_id"]),
+                        updateDef);
+                }
+            }
+        }
+
+        // ✅ Process Save Items
+        if (saveItems.Any())
+        {
+            Console.WriteLine($"\n💾 Bulk saving {saveItems.Count} new items to UILM...");
+            var (saveSuccess, saveMessage) = await UilmBulkOperationService.BulkSaveAsync(saveItems);
+
+            // Update archive records with save status
+            foreach (var deletedRecord in deletedRecords.Where(r => r["FilterType"].AsString == "A"))
+            {
+                var updateDef = Builders<BsonDocument>.Update
+                    .Set("UilmSaveAttempted", true)
+                    .Set("UilmSaveSuccess", saveSuccess)
+                    .Set("UilmSaveMessage", saveMessage);
+
+                await deletedModulesCollection.UpdateOneAsync(
+                    Builders<BsonDocument>.Filter.Eq("_id", deletedRecord["_id"]),
+                    updateDef);
+            }
+        }
+
+        Console.WriteLine("\n✅ UILM Operations Completed\n");
+    }
+
+    private static UilmBulkOperationService.UilmKeyForBulkSave ConvertToUilmBulkSaveFormat(
+        string keyName,
+        BsonDocument module,
+        BsonDocument sourceDoc)
+    {
+        const string AppRootModuleId = "5aa9386f-78cf-4084-bc20-76a38b627ea4";
+
+        var resources = module["Resources"].AsBsonArray.Select(r =>
+            new UilmBulkOperationService.ResourceItemForSave
+            {
+                Value = r["Value"].AsString ?? "",
+                Culture = r["Culture"].AsString ?? "",
+                CharacterLength = (r["Value"].AsString ?? "").Length
+            }
+        ).ToArray();
+
+        return new UilmBulkOperationService.UilmKeyForBulkSave
+        {
+            ItemId = Guid.NewGuid().ToString(),
+            KeyName = keyName ?? "UNKNOWN",
+            ModuleId = AppRootModuleId,
+            Resources = resources ?? Array.Empty<UilmBulkOperationService.ResourceItemForSave>(),
+            Routes = null,
+            IsPartiallyTranslated = resources?.All(r => !string.IsNullOrEmpty(r.Value)) ?? false,
+            IsNewKey = true,
+            LastUpdateDate = DateTime.UtcNow,
+            CreateDate = DateTime.UtcNow,
+            Context = "Auto-generated from duplicate consolidation",
+            ShouldPublish = true,
+            ProjectKey = "5350C966B6894A61B0913EB9FD5DC928"
+        };
     }
 
     private static async Task StoreMigrationResults(
@@ -431,10 +597,7 @@ public static class DuplicateReportAnalyzer
 
         if (resultsToStore.Any())
         {
-            // Clear previous migration results (optional - update instead of insert)
-            await migrationResultCollection.DeleteManyAsync(Builders<BsonDocument>.Filter.Empty);
-            
-            // Insert new migration results
+            //await migrationResultCollection.DeleteManyAsync(Builders<BsonDocument>.Filter.Empty);
             await migrationResultCollection.InsertManyAsync(resultsToStore);
             
             Console.WriteLine($"\n✅ Stored {resultsToStore.Count} migration results to 'MigrationResult'");
@@ -446,433 +609,5 @@ public static class DuplicateReportAnalyzer
                 Console.WriteLine($"   • Filter {filterType}: {totalKeys} keys migrated");
             }
         }
-    }
-
-    private class MigrationFilterResult
-    {
-        public string FilterType { get; set; }
-        public bool HasRootModule { get; set; }
-        public bool HasGenericModule { get; set; }
-        public bool IsConsistent { get; set; }
-        public List<KeyMigrationDetail> Keys { get; set; } = new();
-    }
-
-    private class KeyMigrationDetail
-    {
-        public string Name { get; set; }
-        public int PreviousModules { get; set; }
-        public int DeletedModules { get; set; }
-    }
-
-    private static string NormalizeValue(string value)
-    {
-        if (string.IsNullOrEmpty(value))
-            return "";
-
-        value = value.Trim();
-        value = value.ToLower();
-        value = Regex.Replace(value, @"[^\w\s]", "");
-        value = Regex.Replace(value, @"\s+", " ").Trim();
-
-        return value;
-    }
-
-    private static bool AreValuesNormalized(string value1, string value2)
-    {
-        if (string.IsNullOrEmpty(value1) && string.IsNullOrEmpty(value2))
-            return true;
-
-        var normalized1 = NormalizeValue(value1);
-        var normalized2 = NormalizeValue(value2);
-
-        return normalized1 == normalized2;
-    }
-
-    private static Dictionary<string, SummaryStats> GetSummaryStatistics(List<BsonDocument> results)
-    {
-        var summaryData = new Dictionary<string, SummaryStats>
-        {
-            { "A", new SummaryStats() },
-            { "B", new SummaryStats() },
-            { "C", new SummaryStats() },
-            { "D", new SummaryStats() }
-        };
-
-        foreach (var doc in results)
-        {
-            bool root = doc["HasRootModule"].AsBoolean;
-            bool generic = doc["HasGenericModule"].AsBoolean;
-            bool consistent = doc["IsConsistent"].AsBoolean;
-
-            string key = root switch
-            {
-                false when !generic => "A",
-                false when generic => "B",
-                true when !generic => "C",
-                true when generic => "D",
-                _ => ""
-            };
-
-            if (!string.IsNullOrEmpty(key))
-            {
-                int moduleCount = doc["Modules"].AsBsonArray.Count;
-
-                summaryData[key].TotalDuplicateKeys++;
-                summaryData[key].TotalDuplicateModules += moduleCount;
-
-                if (consistent)
-                {
-                    summaryData[key].DuplicateKeyForSameLanguageTrue++;
-                    summaryData[key].DuplicateModuleForSameLanguageTrue += moduleCount;
-                }
-                else
-                {
-                    summaryData[key].DuplicateKeyForSameLanguageFalse++;
-                    summaryData[key].DuplicateModuleForSameLanguageFalse += moduleCount;
-                }
-
-                // Count deleted modules for all filters when IsConsistent=True
-                if (consistent)
-                {
-                    switch (key)
-                    {
-                        case "A":
-                            // Filter A: Delete all modules, then create new root
-                            summaryData[key].DeletedModules += moduleCount;
-                            break;
-                        case "B":
-                            // Filter B: Delete all except generic-app
-                            int deletedCountB = moduleCount - 1;
-                            summaryData[key].DeletedModules += Math.Max(0, deletedCountB);
-                            break;
-                        case "C":
-                            // Filter C: Delete all except app-root
-                            int deletedCountC = moduleCount - 1;
-                            summaryData[key].DeletedModules += Math.Max(0, deletedCountC);
-                            break;
-                        case "D":
-                            // Filter D: Delete all except app-root
-                            int deletedCountD = moduleCount - 1;
-                            summaryData[key].DeletedModules += Math.Max(0, deletedCountD);
-                            break;
-                    }
-                }
-            }
-        }
-
-        return summaryData;
-    }
-
-    private static List<NormalizedModuleData> GetNormalizedModules(BsonDocument doc)
-    {
-        var normalizedModules = new List<NormalizedModuleData>();
-        var modules = doc["Modules"].AsBsonArray;
-
-        foreach (var module in modules)
-        {
-            var moduleName = module["Module"].AsString;
-            string en = "", de = "", fr = "", it = "";
-
-            foreach (var res in module["Resources"].AsBsonArray)
-            {
-                var culture = res["Culture"].AsString;
-                var value = res["Value"].AsString;
-
-                if (culture == "en-US") en = value;
-                if (culture == "de-DE") de = value;
-                if (culture == "fr-FR") fr = value;
-                if (culture == "it-IT") it = value;
-            }
-
-            var normEN = NormalizeValue(en);
-            var normDE = NormalizeValue(de);
-            var normFR = NormalizeValue(fr);
-            var normIT = NormalizeValue(it);
-
-            var allRawSame = en == de && de == fr && fr == it && !string.IsNullOrEmpty(en);
-            var allNormSame = normEN == normDE && normDE == normFR && normFR == normIT && !string.IsNullOrEmpty(normEN);
-
-            var normalizedData = new NormalizedModuleData
-            {
-                ModuleName = moduleName,
-                RawEnUS = en,
-                RawDeDE = de,
-                RawFrFR = fr,
-                RawItIT = it,
-                NormalizedEnUS = normEN,
-                NormalizedDeDE = normDE,
-                NormalizedFrFR = normFR,
-                NormalizedItIT = normIT,
-                IsNormalized = normEN != en || normDE != de || normFR != fr || normIT != it,
-                AllCulturesRawSame = allRawSame,
-                AllCulturesNormalizedSame = allNormSame
-            };
-
-            normalizedModules.Add(normalizedData);
-        }
-
-        return normalizedModules;
-    }
-
-    private static bool AreCultureValuesConsistent(List<NormalizedModuleData> modules)
-    {
-        var enValues = modules.Select(m => NormalizeValue(m.RawEnUS)).Distinct().Count();
-        var deValues = modules.Select(m => NormalizeValue(m.RawDeDE)).Distinct().Count();
-        var frValues = modules.Select(m => NormalizeValue(m.RawFrFR)).Distinct().Count();
-        var itValues = modules.Select(m => NormalizeValue(m.RawItIT)).Distinct().Count();
-
-        // All cultures should have exactly 1 distinct value across all modules
-        return enValues == 1 && deValues == 1 && frValues == 1 && itValues == 1;
-    }
-
-    private static List<CultureMismatchDetail> GetCultureMismatchDetails(List<NormalizedModuleData> modules)
-    {
-        var mismatchDetails = new List<CultureMismatchDetail>();
-        var cultures = new[] { "en-US", "de-DE", "fr-FR", "it-IT" };
-
-        foreach (var culture in cultures)
-        {
-            var mismatch = new CultureMismatchDetail { Culture = culture };
-            var valueModuleMap = new Dictionary<string, List<string>>();
-
-            // Group modules by normalized culture value
-            foreach (var module in modules)
-            {
-                string rawValue = culture switch
-                {
-                    "en-US" => module.RawEnUS,
-                    "de-DE" => module.RawDeDE,
-                    "fr-FR" => module.RawFrFR,
-                    "it-IT" => module.RawItIT,
-                    _ => ""
-                };
-
-                string normalizedValue = NormalizeValue(rawValue);
-
-                if (!valueModuleMap.ContainsKey(normalizedValue))
-                    valueModuleMap[normalizedValue] = new List<string>();
-
-                valueModuleMap[normalizedValue].Add($"{module.ModuleName} ({rawValue})");
-            }
-
-            mismatch.ModuleValues = valueModuleMap;
-            mismatch.DistinctValueCount = valueModuleMap.Count;
-            mismatch.IsConsistent = mismatch.DistinctValueCount == 1;
-
-            mismatchDetails.Add(mismatch);
-        }
-
-        return mismatchDetails;
-    }
-
-    private static void GeneratePdf(List<BsonDocument> results, bool isDeletePermission)
-    {
-        var summaryStats = GetSummaryStatistics(results);
-
-        var document = Document.Create(container =>
-        {
-            container.Page(page =>
-            {
-                page.Size(PageSizes.A4);
-                page.Margin(20);
-                page.Content().Column(col =>
-                {
-                    col.Item().Text("Duplicate Key Analysis Report (With Normalization)")
-                        .FontSize(20)
-                        .Bold();
-
-                    col.Item().Text($"Generated: {DateTime.Now}")
-                        .FontSize(10);
-
-                    if (isDeletePermission)
-                    {
-                        col.Item().PaddingTop(5).Text("⚠️ DELETE OPERATION EXECUTED")
-                            .FontSize(10).Bold().FontColor("#FF0000");
-                        
-                        col.Item().Text("Filter A: All modules deleted + new 'app-root' created with consistent data")
-                            .FontSize(8).FontColor("#FF6B6B");
-                        
-                        col.Item().Text("Filter B: All modules except 'generic-app' deleted")
-                            .FontSize(8).FontColor("#FF6B6B");
-                        
-                        col.Item().Text("Filter C: All modules except 'app-root' deleted")
-                            .FontSize(8).FontColor("#FF6B6B");
-                        
-                        col.Item().Text("Filter D: All modules except 'app-root' deleted")
-                            .FontSize(8).FontColor("#FF6B6B");
-                    }
-
-                    col.Item().PaddingTop(20).Text("Summary Statistics")
-                        .FontSize(14)
-                        .Bold();
-
-                    // Summary Table
-                    col.Item().PaddingTop(10).Table(table =>
-                    {
-                        table.ColumnsDefinition(columns =>
-                        {
-                            columns.RelativeColumn(0.8f);
-                            columns.RelativeColumn(1.2f);
-                            columns.RelativeColumn(1.2f);
-                            columns.RelativeColumn(1.2f);
-                            columns.RelativeColumn(1.2f);
-                            columns.RelativeColumn(1.8f);
-                            columns.RelativeColumn(1.8f);
-                            columns.RelativeColumn(1.8f);
-                            columns.RelativeColumn(1.8f);
-                            columns.RelativeColumn(1.2f);
-                        });
-
-                        table.Header(header =>
-                        {
-                            header.Cell().Background("#4472C4").Text("Filter").FontSize(7).Bold().FontColor(Colors.White);
-                            header.Cell().Background("#4472C4").Text("Root").FontSize(7).Bold().FontColor(Colors.White);
-                            header.Cell().Background("#4472C4").Text("Generic").FontSize(7).Bold().FontColor(Colors.White);
-                            header.Cell().Background("#4472C4").Text("Total Dup Keys").FontSize(7).Bold().FontColor(Colors.White);
-                            header.Cell().Background("#4472C4").Text("Total Dup Modules").FontSize(7).Bold().FontColor(Colors.White);
-                            header.Cell().Background("#4472C4").Text("Consistent Keys").FontSize(6).Bold().FontColor(Colors.White);
-                            header.Cell().Background("#4472C4").Text("Consistent Modules").FontSize(6).Bold().FontColor(Colors.White);
-                            header.Cell().Background("#4472C4").Text("Inconsistent Keys").FontSize(6).Bold().FontColor(Colors.White);
-                            header.Cell().Background("#4472C4").Text("Inconsistent Modules").FontSize(6).Bold().FontColor(Colors.White);
-                            header.Cell().Background("#FF6B6B").Text("Deleted").FontSize(7).Bold().FontColor(Colors.White);
-                        });
-
-                        var rows = new[] { ("A", false, false), ("B", false, true), ("C", true, false), ("D", true, true) };
-                        int grandTotalKeys = 0, grandTotalModules = 0, grandKeysTrue = 0, grandModulesTrue = 0, grandKeysFalse = 0, grandModulesFalse = 0, grandDeleted = 0;
-
-                        foreach (var (letter, hasRoot, hasGeneric) in rows)
-                        {
-                            var stats = summaryStats[letter];
-                            grandTotalKeys += stats.TotalDuplicateKeys;
-                            grandTotalModules += stats.TotalDuplicateModules;
-                            grandKeysTrue += stats.DuplicateKeyForSameLanguageTrue;
-                            grandModulesTrue += stats.DuplicateModuleForSameLanguageTrue;
-                            grandKeysFalse += stats.DuplicateKeyForSameLanguageFalse;
-                            grandModulesFalse += stats.DuplicateModuleForSameLanguageFalse;
-                            grandDeleted += stats.DeletedModules;
-
-                            table.Cell().Background("#E7E6E6").Text(letter).FontSize(7).Bold();
-                            table.Cell().Text(hasRoot.ToString()).FontSize(7);
-                            table.Cell().Text(hasGeneric.ToString()).FontSize(7);
-                            table.Cell().Text(stats.TotalDuplicateKeys.ToString()).FontSize(7).Bold();
-                            table.Cell().Text(stats.TotalDuplicateModules.ToString()).FontSize(7).Bold();
-                            table.Cell().Text(stats.DuplicateKeyForSameLanguageTrue.ToString()).FontSize(7);
-                            table.Cell().Text(stats.DuplicateModuleForSameLanguageTrue.ToString()).FontSize(7);
-                            table.Cell().Text(stats.DuplicateKeyForSameLanguageFalse.ToString()).FontSize(7);
-                            table.Cell().Text(stats.DuplicateModuleForSameLanguageFalse.ToString()).FontSize(7);
-                            table.Cell().Background("#FFE0E0").Text(stats.DeletedModules.ToString()).FontSize(7).Bold();
-                        }
-
-                        table.Cell().Background("#D3D3D3").Text("Total").FontSize(7).Bold();
-                        table.Cell().Background("#D3D3D3").Text("").FontSize(7);
-                        table.Cell().Background("#D3D3D3").Text("").FontSize(7);
-                        table.Cell().Background("#D3D3D3").Text(grandTotalKeys.ToString()).FontSize(7).Bold();
-                        table.Cell().Background("#D3D3D3").Text(grandTotalModules.ToString()).FontSize(7).Bold();
-                        table.Cell().Background("#D3D3D3").Text(grandKeysTrue.ToString()).FontSize(7).Bold();
-                        table.Cell().Background("#D3D3D3").Text(grandModulesTrue.ToString()).FontSize(7).Bold();
-                        table.Cell().Background("#D3D3D3").Text(grandKeysFalse.ToString()).FontSize(7).Bold();
-                        table.Cell().Background("#D3D3D3").Text(grandModulesFalse.ToString()).FontSize(7).Bold();
-                        table.Cell().Background("#FFD3D3").Text(grandDeleted.ToString()).FontSize(7).Bold();
-                    });
-
-                    col.Item().PaddingTop(30).Text("Detailed Key Analysis")
-                        .FontSize(14)
-                        .Bold();
-
-                    foreach (var doc in results)
-                    {
-                        string key = doc["KeyName"].AsString;
-                        bool root = doc["HasRootModule"].AsBoolean;
-                        bool generic = doc["HasGenericModule"].AsBoolean;
-                        bool consistent = doc["IsConsistent"].AsBoolean;
-
-                        col.Item().PaddingTop(15).Text($"KeyName: {key}")
-                            .FontSize(12)
-                            .Bold();
-
-                        col.Item().Text($"HasRootModule: {root} | HasGenericModule: {generic} | IsConsistent: {consistent}")
-                            .FontSize(9);
-
-                        var normalizedModules = GetNormalizedModules(doc);
-                        bool cultureConsistent = AreCultureValuesConsistent(normalizedModules);
-
-                        if (cultureConsistent)
-                        {
-                            col.Item().PaddingTop(5).Text("✓ All modules use consistent translations")
-                                .FontSize(9).Bold().FontColor("#008000");
-                        }
-                        else
-                        {
-                            col.Item().PaddingTop(5).Text("✗ Inconsistent translations detected")
-                                .FontSize(9).Bold().FontColor("#FF0000");
-
-                            var mismatchDetails = GetCultureMismatchDetails(normalizedModules);
-
-                            col.Item().PaddingTop(8).Text("Issues by Culture:")
-                                .FontSize(8).Bold();
-
-                            foreach (var mismatch in mismatchDetails)
-                            {
-                                if (!mismatch.IsConsistent)
-                                {
-                                    col.Item().PaddingTop(5).Text($"{mismatch.Culture}: {mismatch.DistinctValueCount} different values")
-                                        .FontSize(7).FontColor("#FF0000").Bold();
-
-                                    foreach (var kvp in mismatch.ModuleValues)
-                                    {
-                                        col.Item().Text($"  Value: \"{kvp.Key}\"")
-                                            .FontSize(7);
-
-                                        foreach (var moduleInfo in kvp.Value)
-                                        {
-                                            col.Item().Text($"    • {moduleInfo}")
-                                                .FontSize(6);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        col.Item().PaddingTop(8).Table(table =>
-                        {
-                            table.ColumnsDefinition(columns =>
-                            {
-                                columns.RelativeColumn(1.5f);
-                                columns.RelativeColumn(1.5f);
-                                columns.RelativeColumn(1.5f);
-                                columns.RelativeColumn(1.5f);
-                                columns.RelativeColumn(1.5f);
-                                columns.RelativeColumn(0.8f);
-                            });
-
-                            table.Header(header =>
-                            {
-                                header.Cell().Background("#70AD47").Text("Module").FontSize(8).Bold().FontColor(Colors.White);
-                                header.Cell().Background("#70AD47").Text("en-US").FontSize(8).Bold().FontColor(Colors.White);
-                                header.Cell().Background("#70AD47").Text("de-DE").FontSize(8).Bold().FontColor(Colors.White);
-                                header.Cell().Background("#70AD47").Text("fr-FR").FontSize(8).Bold().FontColor(Colors.White);
-                                header.Cell().Background("#70AD47").Text("it-IT").FontSize(8).Bold().FontColor(Colors.White);
-                                header.Cell().Background("#70AD47").Text("Match").FontSize(8).Bold().FontColor(Colors.White);
-                            });
-
-                            foreach (var moduleData in normalizedModules)
-                            {
-                                var sameStatus = moduleData.AllCulturesNormalizedSame ? "✓" : "✗";
-                                var statusColor = moduleData.AllCulturesNormalizedSame ? "#C6EFCE" : "#FFC7CE";
-
-                                table.Cell().Background(statusColor).Text(moduleData.ModuleName).FontSize(8);
-                                table.Cell().Background(statusColor).Text(moduleData.NormalizedEnUS).FontSize(8);
-                                table.Cell().Background(statusColor).Text(moduleData.NormalizedDeDE).FontSize(8);
-                                table.Cell().Background(statusColor).Text(moduleData.NormalizedFrFR).FontSize(8);
-                                table.Cell().Background(statusColor).Text(moduleData.NormalizedItIT).FontSize(8);
-                                table.Cell().Background(statusColor).Text(sameStatus).FontSize(8).Bold();
-                            }
-                        });
-                    }
-                });
-            });
-        });
-
-        document.GeneratePdf("DuplicateKeyReport.pdf");
     }
 }
