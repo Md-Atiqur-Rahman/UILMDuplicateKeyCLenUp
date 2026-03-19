@@ -5,16 +5,16 @@ using QuestPDF.Infrastructure;
 // Set Community license (for organizations with < $1M annual revenue)
 QuestPDF.Settings.License = LicenseType.Community;
 
-//await UilmService.CallGetApi("21b9e142-48ef-46cc-81c5-50907ba36f72");
-
-//await DuplicateDetector.GenerateDuplicateReport();
-await TestDuplicateReportAnalyzer.GenerateSummaryReport(
-    keyNameFilter: null,
-    //hasRootModule: false,
-    //hasGenericModule: false,
-    isConsistent: true,
-    isDeletePermission: false
-);
+//await UilmService.CallGetApi("e2a0d946-0235-42b1-8acd-3dc712d71801");
+//await UilmBulkOperationService.ExecuteFilterACleanupMigration();
+await DuplicateDetector.GenerateDuplicateReport();
+//await TestDuplicateReportAnalyzer.GenerateSummaryReport(
+//    keyNameFilter: null,
+//    //hasRootModule: false,
+//    //hasGenericModule: false,
+//    isConsistent: true,
+//    isDeletePermission: false
+//);
 //await DuplicateReportAnalyzer.GenerateSummaryReport(
 //    keyNameFilter: "SALUTATION_MS",
 //    hasRootModule: true,
@@ -24,6 +24,6 @@ await TestDuplicateReportAnalyzer.GenerateSummaryReport(
 //);
 
 //Generate InConsistentSummary Report
-//await InConsistentSummaryReportGenerator.GenerateInConsistentSummaryReport(
-//    keyNameFilter: null
-//);
+await InConsistentSummaryReportGenerator.GenerateInConsistentSummaryReport(
+    keyNameFilter: null
+);

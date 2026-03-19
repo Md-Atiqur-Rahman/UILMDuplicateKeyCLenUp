@@ -58,7 +58,7 @@ public static class InConsistentSummaryReportGenerator
         var filterBuilder = Builders<BsonDocument>.Filter;
         var filter = filterBuilder.Empty;
 
-        filter &= filterBuilder.Eq("Isconsistent", false);
+        filter &= filterBuilder.Eq("IsConsistent", false);
 
         if (!string.IsNullOrEmpty(keyNameFilter))
             filter &= filterBuilder.Eq("KeyName", keyNameFilter);

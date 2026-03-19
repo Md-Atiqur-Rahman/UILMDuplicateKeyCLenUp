@@ -3,17 +3,11 @@ using MongoDB.Driver;
 using QuestPDF.Fluent;
 using QuestPDF.Helpers;
 using QuestPDF.Previewer;
-using System.Buffers.Text;
-using System.Net.Http.Headers;
-using System.Reflection;
-using System.Resources;
-using System.Text.Json;
 using System.Text.RegularExpressions;
-using static ConsoleApp.UilmBulkOperationService;
 
 namespace ConsoleApp;
 
-public static class DuplicateReportAnalyzer
+public static class DuplicateDataCleaner
 {
     // ✅ Add these helper classes here
     private class MigrationFilterResult
@@ -169,18 +163,19 @@ public static class DuplicateReportAnalyzer
                 // Extract consistent data from first module
                 var firstModule = modules[0].AsBsonDocument;
                 var consistentResources = firstModule["Resources"].AsBsonArray;
+                var firstModuleId = firstModule["Id"].AsString;
 
-                // ✅ Create new generic-app module with consistent data (instead of app-root)
-                var newGenericModule = new BsonDocument
+                // Create new root module with consistent data
+                var newRootModule = new BsonDocument
                 {
                     { "Module", "generic-app" },
                     { "Id", ObjectId.GenerateNewId().ToString() },
                     { "Resources", consistentResources }
                 };
 
-                var modulesToKeep = new BsonArray { newGenericModule };
+                var modulesToKeep = new BsonArray { newRootModule };
 
-                // ✅ Track ALL modules for deletion from UILM
+                // ✅ Track ALL modules for deletion from UILM (Filter A also deletes from UILM)
                 foreach (var module in modules)
                 {
                     if (module["Id"] != null)
@@ -189,10 +184,10 @@ public static class DuplicateReportAnalyzer
                     }
                 }
 
-                // ✅ Prepare for UILM save (new generic-app module)
-                var uilmNewKey = ConvertToUilmBulkSaveFormatGeneric(
+                // ✅ Prepare for UILM save (new root module)
+                var uilmNewKey = ConvertToUilmBulkSaveFormat(
                     doc["KeyName"].AsString,
-                    newGenericModule,
+                    newRootModule,
                     doc
                 );
                 uilmSaveItems.Add(uilmNewKey);
@@ -208,7 +203,7 @@ public static class DuplicateReportAnalyzer
                     { "HasGenericModule", hasGeneric },
                     { "IsConsistent", isConsistent },
                     { "DeletedModules", modulesToDelete },
-                    { "NewGenericModuleCreated", newGenericModule },
+                    { "NewRootModuleCreated", newRootModule },
                     { "ConsistentDataExtractedFrom", firstModule["Module"] },
                     { "UilmDeleteAttempted", false },
                     { "UilmSaveAttempted", false }
@@ -229,7 +224,7 @@ public static class DuplicateReportAnalyzer
 
                 Console.WriteLine($"✅ [FILTER A] Deleted {deletedModuleCount} modules for KeyName: {keyName}");
                 Console.WriteLine($"   └─ Deleted from UILM: {deletedModuleCount} old modules");
-                Console.WriteLine($"   └─ Created in UILM: 1 new 'generic-app' module");
+                Console.WriteLine($"   └─ Created in UILM: 1 new 'app-root' module");
             }
 
             // ✅ FILTER B: HasRoot=False, HasGeneric=True, IsConsistent=True
@@ -460,34 +455,6 @@ public static class DuplicateReportAnalyzer
         await StoreMigrationResults(migrationResultCollection, migrationResults);
     }
 
-    private static async Task DeleteFixFilterAMigration()
-    {
-        
-        var existingItems = new List<string>();
-        var InsertedModules = GetInsertedIds();
-        Console.WriteLine($"📋 Checking {InsertedModules.Count} items for existence in UILM...");
-        foreach (var itemId in InsertedModules)
-        {
-            var exists = await UilmBulkOperationService.ItemExistsAsync(itemId);
-            if (exists)
-            {
-                existingItems.Add(itemId);
-                Console.WriteLine($"   ✓ Item exists: {itemId}");
-            }
-            else
-            {
-                Console.WriteLine($"   ✗ Item not found: {itemId}");
-            }
-        }
-
-        if (existingItems.Any())
-        {
-            Console.WriteLine($"\n🗑️  Bulk deleting {existingItems.Count} items from UILM...");
-            var (deleteSuccess, deleteMessage) = await UilmBulkOperationService.BulkDeleteAsync(existingItems);
-
-        }
-    }
-    
     private static async Task ExecuteUilmOperations(
         List<string> deleteItemIds,
         List<UilmBulkOperationService.UilmKeyForBulkSave> saveItems,
@@ -565,39 +532,6 @@ public static class DuplicateReportAnalyzer
         BsonDocument module,
         BsonDocument sourceDoc)
     {
-        const string AppRootModuleId = "5aa9386f-78cf-4084-bc20-76a38b627ea4";
-
-        var resources = module["Resources"].AsBsonArray.Select(r =>
-            new UilmBulkOperationService.ResourceItemForSave
-            {
-                Value = r["Value"].AsString ?? "",
-                Culture = r["Culture"].AsString ?? "",
-                CharacterLength = (r["Value"].AsString ?? "").Length
-            }
-        ).ToArray();
-
-        return new UilmBulkOperationService.UilmKeyForBulkSave
-        {
-            ItemId = Guid.NewGuid().ToString(),
-            KeyName = keyName ?? "UNKNOWN",
-            ModuleId = AppRootModuleId,
-            Resources = resources ?? Array.Empty<UilmBulkOperationService.ResourceItemForSave>(),
-            Routes = null,
-            IsPartiallyTranslated = resources?.All(r => !string.IsNullOrEmpty(r.Value)) ?? false,
-            IsNewKey = true,
-            LastUpdateDate = DateTime.UtcNow,
-            CreateDate = DateTime.UtcNow,
-            Context = "Auto-generated from duplicate consolidation",
-            ShouldPublish = true,
-            ProjectKey = "5350C966B6894A61B0913EB9FD5DC928"
-        };
-    }
-
-    private static UilmBulkOperationService.UilmKeyForBulkSave ConvertToUilmBulkSaveFormatGeneric(
-        string keyName,
-        BsonDocument module,
-        BsonDocument sourceDoc)
-    {
         const string GenericAppModuleId = "f43680b9-df15-4c01-998d-eac8fac79d25";
 
         var resources = module["Resources"].AsBsonArray.Select(r =>
@@ -616,7 +550,7 @@ public static class DuplicateReportAnalyzer
             ModuleId = GenericAppModuleId,
             Resources = resources ?? Array.Empty<UilmBulkOperationService.ResourceItemForSave>(),
             Routes = null,
-            IsPartiallyTranslated = false,
+            IsPartiallyTranslated = resources?.All(r => !string.IsNullOrEmpty(r.Value)) ?? false,
             IsNewKey = true,
             LastUpdateDate = DateTime.UtcNow,
             CreateDate = DateTime.UtcNow,
@@ -676,6 +610,4 @@ public static class DuplicateReportAnalyzer
             }
         }
     }
-
-   
 }
