@@ -10,7 +10,7 @@ QuestPDF.Settings.License = LicenseType.Community;
 //await DuplicateDetector.GenerateDuplicateReport();
 await InconsistentDuplicateCleaner.GenerateSummaryReport(
     keyNameFilter: null,
-    hasRootModule: true,
+    hasRootModule: false,
     hasGenericModule: false,
     isConsistent: false,
     isDeletePermission: false

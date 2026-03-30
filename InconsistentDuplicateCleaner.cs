@@ -596,7 +596,27 @@ public static class InconsistentDuplicateCleaner
             }
 
             // ✅ Process groups based on filter type
-            ProcessMatchedGroup(matchedGroup);
+            if (filterType == "A")
+            {
+                await FilterAProcessor.ProcessFilterA(
+                    doc,
+                    collection,
+                    deletedModulesCollection,
+                    uilmDeleteIds,
+                    uilmDeleteItemKeyMap,
+                    uilmInsertItems,
+                    keyName,
+                    previousModuleCount,
+                    deletedModuleCount);
+            }
+            else if (filterType == "B" || filterType == "D")
+            {
+                ProcessMatchedGroup(matchedGroup);
+            }
+            else if (filterType == "C")
+            {
+                ProcessMatchedGroup(matchedGroup);
+            }
             
             // ✅ Save archives for both groups
             foreach (var ar in groupArchives)
