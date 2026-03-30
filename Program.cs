@@ -8,10 +8,10 @@ QuestPDF.Settings.License = LicenseType.Community;
 //await UilmService.CallGetApi("e2a0d946-0235-42b1-8acd-3dc712d71801");
 //await UilmBulkOperationService.ExecuteFilterACleanupMigration();
 //await DuplicateDetector.GenerateDuplicateReport();
-await TestInconsistentDuplicateCleaner.GenerateSummaryReport(
+await InconsistentDuplicateCleaner.GenerateSummaryReport(
     keyNameFilter: null,
-    //hasRootModule: false,
-    //hasGenericModule: false,
+    hasRootModule: true,
+    hasGenericModule: false,
     isConsistent: false,
     isDeletePermission: false
 );
